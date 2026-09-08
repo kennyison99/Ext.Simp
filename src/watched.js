@@ -167,17 +167,29 @@
     } catch { return ''; }
   }
   function findPreview(doc, base) {
-    // Only post content: avatars, site logos and embedded-player controls are not covers.
-    for (const img of doc.querySelectorAll('.message-body .bbWrapper img, .message-body img.bbImage')) {
+    const candidates = [];
+    const add = value => {
+      const url = imageUrl(value, base);
+      if (!url || candidates.includes(url)) return;
+      const parsed = new URL(url);
+      if (/\/(?:smilies|emoji|avatars|emoticons)\//i.test(parsed.pathname) ||
+        /(?:avatar|smilie|emoji|reaction)/i.test(parsed.pathname + parsed.search)) return;
+      candidates.push(url);
+    };
+    // Prefer an explicit forum attachment or the page's OpenGraph image.
+    doc.querySelectorAll('meta[property="og:image"], meta[name="twitter:image"]').forEach(meta => add(meta.content));
+    for (const img of doc.querySelectorAll('.message-body img, .attachment--image img, .bbImage')) {
       if (img.closest('.bbCodeBlock--quote, .bbCodeBlock--spoiler') ||
-        /smilie|emoji|avatar/i.test(img.className) ||
+        /smilie|emoji|avatar/i.test(String(img.className)) ||
         (img.getAttribute('width') && Number(img.getAttribute('width')) < 80)) continue;
-      for (const value of [img.getAttribute('data-src'), img.getAttribute('data-url'), img.getAttribute('src')]) {
-        const url = imageUrl(value, base);
-        if (url && !/\/(?:smilies|emoji|avatars)\//i.test(new URL(url).pathname)) return url;
-      }
+      for (const value of [img.getAttribute('data-src'), img.getAttribute('data-original'), img.getAttribute('data-lazy-src'), img.getAttribute('data-url'), img.currentSrc, img.getAttribute('src')]) add(value);
     }
-    return '';
+    // Some forum hosts render an image as a normal attachment link without an img tag.
+    for (const link of doc.querySelectorAll('.message-body a[href], .attachment a[href], .attachment--image a[href]')) {
+      const href = link.getAttribute('href') || '';
+      if (/\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(href)) add(href);
+    }
+    return candidates[0] || '';
   }
   function preview(record, small = false) {
     const box = document.createElement('span');

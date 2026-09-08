@@ -208,3 +208,16 @@ test('preview cache persists across page loads, expires, and rejects unsafe imag
     assert.equal(store.values['citylink:watched:default:previews'][2].url, '');
   } finally { app.dom.window.close(); }
 });
+
+test('preview extraction covers OpenGraph, attachment links, and lazy image fields', async () => {
+  const app = await setup(row(1), { fetch: async () => ({ ok: true, text: async () => `
+    <meta property="og:image" content="https://images.example/og.jpg">
+    <div class="message-body"><div class="bbWrapper">
+      <a href="https://images.example/attachment.png">download image</a>
+      <img data-original="https://images.example/lazy.jpg" src="/placeholder.svg">
+    </div></div>` }) });
+  try {
+    app.reveal(); await tick(); await tick();
+    assert.equal(app.$('.preview img').src, 'https://images.example/og.jpg');
+  } finally { app.dom.window.close(); }
+});
