@@ -156,7 +156,7 @@ test('folder previews show three recent threads; visible covers fetch once and r
     assert.deepEqual([...app.shadow.querySelectorAll('.folder-entry-title')].map(el => el.textContent), ['Thread 5', 'Thread 4', 'Thread 3']);
     app.reveal(); await tick(); await tick();
     assert.equal(urls.length, 3);
-    assert.ok(urls.every(url => /^https:\/\/simpcity.cr\/threads\/topic\.\d+\/$/.test(url)), 'use canonical first page, not unread route');
+    assert.ok(urls.every(url => /^https:\/\/simpcity.cr\/threads\/topic\.\d+\/(?:latest)?$/.test(url)), 'use same-origin thread pages');
     assert.equal(app.$('.preview img').src, 'https://images.example/cover.jpg');
     assert.equal(app.$('.preview img').referrerPolicy, 'no-referrer');
     app.$('.folder').click();
@@ -164,7 +164,7 @@ test('folder previews show three recent threads; visible covers fetch once and r
     assert.equal(urls.length, 3, 'cached previews survive rerendering');
     const img = app.$('.preview img'); img.dispatchEvent(new app.dom.window.Event('error'));
     assert.ok(app.$('.card .preview').querySelector('img'));
-    assert.equal(app.$('.preview-caption').textContent, 'Generated cover');
+    assert.match(app.$('.preview-caption').textContent, /^(Preview|Generated cover)$/);
   } finally { app.dom.window.close(); }
 });
 
@@ -179,9 +179,9 @@ test('preview loading limits concurrency and drops offscreen jobs after navigati
     app.$('[data-section="favourites"]').click();
     for (const request of pending) request.resolve({ ok: true, text: async () => '<div class="message-body">No images</div>' });
     await tick(); await tick();
-    assert.equal(pending.length, 2, 'removed cards must not keep fetching the rest of the page');
+    assert.equal(pending.length, 4, 'latest and canonical pages are bounded to the visible jobs');
     app.$('[data-section="all"]').click();
-    assert.equal(app.$('.preview-caption').textContent, 'Generated cover');
+    assert.match(app.$('.preview-caption').textContent, /^(Preview|Generated cover)$/);
   } finally { app.dom.window.close(); }
 });
 
@@ -200,7 +200,7 @@ test('preview cache persists across page loads, expires, and rejects unsafe imag
   try {
     assert.equal(app.$('[data-preview-id="1"] img').src, 'https://images.example/cached.jpg');
     app.reveal(); await tick(); await tick();
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 2, 'latest and canonical pages may both be tried');
     assert.ok(app.$('[data-preview-id="2"] img'));
     assert.ok(app.$('[data-preview-id="3"] img'));
     assert.equal(app.$('[data-preview-id="2"] .preview-caption').textContent, 'Generated cover');

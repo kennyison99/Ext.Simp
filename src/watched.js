@@ -185,9 +185,13 @@
       for (const value of [img.getAttribute('data-src'), img.getAttribute('data-original'), img.getAttribute('data-lazy-src'), img.getAttribute('data-url'), img.currentSrc, img.getAttribute('src')]) add(value);
     }
     // Some forum hosts render an image as a normal attachment link without an img tag.
-    for (const link of doc.querySelectorAll('.message-body a[href], .attachment a[href], .attachment--image a[href]')) {
+    for (const link of doc.querySelectorAll('.message-body a[href], .attachment a[href], .attachment--image a[href], a.js-lbImage-attachment')) {
       const href = link.getAttribute('href') || '';
-      if (/\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(href)) add(href);
+      const dataHref = link.getAttribute('data-url') || link.getAttribute('data-src') || href;
+      if (/\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(href) || /attachment|image|lightbox|media/i.test(link.className)) add(dataHref);
+    }
+    for (const media of doc.querySelectorAll('.message-body video[poster], .message-body iframe[data-src], .message-body [data-preview-url]')) {
+      add(media.getAttribute('poster') || media.getAttribute('data-preview-url') || media.getAttribute('data-src'));
     }
     return candidates[0] || '';
   }
@@ -198,6 +202,7 @@
     box.dataset.previewTitle = record.title;
     // Fetch the canonical first page rather than an /unread URL that can jump between pages.
     box.dataset.previewUrl = record.url.replace(/(\/threads\/[^/?#]+\.\d+)(?:\/[^?#]*)?(?:[?#].*)?$/, '$1/');
+    box.dataset.previewLatestUrl = record.latestUrl || box.dataset.previewUrl;
     box.append(text('span', record.title.trim().slice(0, 2).toUpperCase(), 'preview-initial'));
     box.append(text('span', 'Preview', 'preview-caption'));
     box.setAttribute('aria-hidden', 'true');
@@ -236,7 +241,7 @@
   function queuePreview(box) {
     const id = box.dataset.previewId;
     if (previews.has(id)) { paintPreview(box, imageUrl(previews.get(id).url)); return; }
-    if (!previewJobs.has(id)) previewJobs.set(id, { url: box.dataset.previewUrl, boxes: new Set(), running: false });
+    if (!previewJobs.has(id)) previewJobs.set(id, { urls: [box.dataset.previewLatestUrl, box.dataset.previewUrl].filter((url, index, list) => url && list.indexOf(url) === index), boxes: new Set(), running: false });
     previewJobs.get(id).boxes.add(box);
     drainPreviews();
   }
@@ -250,12 +255,15 @@
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10000);
         let url = '';
-        try {
-          const response = await fetch(job.url, { credentials: 'same-origin', signal: controller.signal });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          url = findPreview(new DOMParser().parseFromString(await response.text(), 'text/html'), job.url);
-        } catch { /* Keep the title and fallback usable when a post cannot be fetched. */ }
-        finally { clearTimeout(timer); }
+        for (const sourceUrl of job.urls) {
+          try {
+            const response = await fetch(sourceUrl, { credentials: 'same-origin', signal: controller.signal });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            url = findPreview(new DOMParser().parseFromString(await response.text(), 'text/html'), sourceUrl);
+            if (url) break;
+          } catch { /* Try the canonical page if the latest page is unavailable. */ }
+        }
+        clearTimeout(timer);
         rememberPreview(id, url);
         for (const box of job.boxes) paintPreview(box, url);
       })().finally(() => { previewJobs.delete(id); previewActive--; drainPreviews(); });
