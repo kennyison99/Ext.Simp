@@ -241,7 +241,11 @@
   }
   function queuePreview(box) {
     const id = box.dataset.previewId;
-    if (previews.has(id)) { paintPreview(box, imageUrl(previews.get(id).url)); return; }
+    const cached = previews.get(id);
+    // Empty results are only a fallback marker; retry them so a later resolver fix
+    // or a temporarily unavailable host can recover without clearing storage.
+    if (cached?.url) { paintPreview(box, imageUrl(cached.url)); return; }
+    if (cached) previews.delete(id);
     if (!previewJobs.has(id)) previewJobs.set(id, { urls: [box.dataset.previewLatestUrl, box.dataset.previewUrl].filter((url, index, list) => url && list.indexOf(url) === index), boxes: new Set(), running: false });
     previewJobs.get(id).boxes.add(box);
     drainPreviews();

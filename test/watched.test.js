@@ -154,7 +154,7 @@ test('folder previews show three recent threads; visible covers fetch once and r
   try {
     assert.equal(urls.length, 0, 'offscreen previews do not fetch thread pages');
     assert.deepEqual([...app.shadow.querySelectorAll('.folder-entry-title')].map(el => el.textContent), ['Thread 5', 'Thread 4', 'Thread 3']);
-    app.reveal(); await tick(); await tick();
+    app.reveal(); await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(urls.length, 3);
     assert.ok(urls.every(url => /^https:\/\/simpcity.cr\/threads\/topic\.\d+\/(?:latest)?$/.test(url)), 'use same-origin thread pages');
     assert.equal(app.$('.preview img').src, 'https://images.example/cover.jpg');
