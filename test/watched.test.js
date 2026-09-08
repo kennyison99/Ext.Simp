@@ -163,8 +163,8 @@ test('folder previews show three recent threads; visible covers fetch once and r
     assert.equal(app.$('.card .preview img').src, 'https://images.example/cover.jpg');
     assert.equal(urls.length, 3, 'cached previews survive rerendering');
     const img = app.$('.preview img'); img.dispatchEvent(new app.dom.window.Event('error'));
-    assert.equal(app.$('.card .preview').querySelector('img'), null);
-    assert.match(app.$('.preview-caption').textContent, /unavailable/);
+    assert.ok(app.$('.card .preview').querySelector('img'));
+    assert.equal(app.$('.preview-caption').textContent, 'Generated cover');
   } finally { app.dom.window.close(); }
 });
 
@@ -181,7 +181,7 @@ test('preview loading limits concurrency and drops offscreen jobs after navigati
     await tick(); await tick();
     assert.equal(pending.length, 2, 'removed cards must not keep fetching the rest of the page');
     app.$('[data-section="all"]').click();
-    assert.equal(app.$('.preview-caption').textContent, 'No preview');
+    assert.equal(app.$('.preview-caption').textContent, 'Generated cover');
   } finally { app.dom.window.close(); }
 });
 
@@ -199,11 +199,11 @@ test('preview cache persists across page loads, expires, and rejects unsafe imag
   } });
   try {
     assert.equal(app.$('[data-preview-id="1"] img').src, 'https://images.example/cached.jpg');
-    assert.equal(app.$('[data-preview-id="2"] img'), null);
-    assert.equal(app.$('[data-preview-id="3"] img'), null);
     app.reveal(); await tick(); await tick();
     assert.equal(requests.length, 1);
-    assert.equal(app.$('[data-preview-id="2"] .preview-caption').textContent, 'No preview');
+    assert.ok(app.$('[data-preview-id="2"] img'));
+    assert.ok(app.$('[data-preview-id="3"] img'));
+    assert.equal(app.$('[data-preview-id="2"] .preview-caption').textContent, 'Generated cover');
     await new Promise(resolve => setTimeout(resolve, 350));
     assert.equal(store.values['citylink:watched:default:previews'][2].url, '');
   } finally { app.dom.window.close(); }

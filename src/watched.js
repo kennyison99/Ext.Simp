@@ -195,9 +195,10 @@
     const box = document.createElement('span');
     box.className = `preview${small ? ' preview-small' : ''}`;
     box.dataset.previewId = record.id;
+    box.dataset.previewTitle = record.title;
     // Fetch the canonical first page rather than an /unread URL that can jump between pages.
     box.dataset.previewUrl = record.url.replace(/(\/threads\/[^/?#]+\.\d+)(?:\/[^?#]*)?(?:[?#].*)?$/, '$1/');
-    box.append(text('span', record.title.trim().slice(0, 1).toUpperCase(), 'preview-initial'));
+    box.append(text('span', record.title.trim().slice(0, 2).toUpperCase(), 'preview-initial'));
     box.append(text('span', 'Preview', 'preview-caption'));
     box.setAttribute('aria-hidden', 'true');
     return box;
@@ -206,18 +207,24 @@
     if (!box.isConnected) return;
     box.querySelector('img')?.remove();
     box.classList.remove('has-image');
-    box.querySelector('.preview-caption').textContent = url ? 'Preview' : 'No preview';
-    if (!url) return;
+    const fallback = !url;
+    const source = url || placeholderUrl(box.dataset.previewTitle || '?');
+    box.querySelector('.preview-caption').textContent = fallback ? 'Generated cover' : 'Preview';
     const img = document.createElement('img');
     img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.referrerPolicy = 'no-referrer';
-    img.addEventListener('load', () => box.classList.add('has-image'), { once: true });
+    img.addEventListener('load', () => { box.classList.add('has-image'); if (fallback) box.classList.add('generated'); }, { once: true });
     img.addEventListener('error', () => {
-      img.remove(); box.classList.remove('has-image');
-      box.querySelector('.preview-caption').textContent = 'Preview unavailable';
-      rememberPreview(box.dataset.previewId, '');
+      if (!fallback) { rememberPreview(box.dataset.previewId, ''); paintPreview(box, ''); }
     }, { once: true });
-    img.src = url; box.append(img);
+    img.src = source; box.append(img);
   }
+  function placeholderUrl(title) {
+    const label = String(title || '?').trim().slice(0, 2).toUpperCase() || '?';
+    const hue = [...label].reduce((sum, character) => sum + character.charCodeAt(0), 0) % 360;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="hsl(${hue} 56% 30%)"/><stop offset="1" stop-color="hsl(${(hue + 55) % 360} 46% 18%)"/></linearGradient></defs><rect width="640" height="400" fill="url(#g)"/><circle cx="535" cy="72" r="130" fill="white" opacity=".06"/><text x="320" y="225" text-anchor="middle" dominant-baseline="middle" font-family="system-ui,sans-serif" font-size="108" font-weight="700" fill="white" opacity=".82">${escapeXml(label)}</text></svg>`;
+    return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+  }
+  function escapeXml(value) { return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[character])); }
   function rememberPreview(id, url) {
     previews.set(id, { url, at: Date.now() });
     clearTimeout(previewSaveTimer);

@@ -26,7 +26,8 @@ Thread cards have image covers, and compact rows keep a small thumbnail. Preview
 the first thread page only when near the viewport, with at most two preview requests
 at once. The first eligible image in post content is used; avatars, quoted images and
 spoiler images are excluded. Covers are cached locally for seven days (missing or failed
-previews for one hour), with a title initial as fallback. Fetching thread pages may
+previews for one hour), with a generated SVG title cover as fallback so every card
+always has a visual cover. Fetching thread pages may
 affect the forum's read tracking; the unread count reflects the loaded watched list.
 Stars persist in extension-local storage and follow the thread ID even after a rename.
 View/search/page state is remembered in the current tab. Original forum view restores
