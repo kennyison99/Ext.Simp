@@ -230,3 +230,18 @@ test('preview extraction accepts extensionless Goonbox image links', async () =>
     assert.equal(app.$('.preview img').src, 'https://goonbox.cr/img/ak9Rgzm');
   } finally { app.dom.window.close(); }
 });
+
+test('an old empty cache entry is observed and retried', async () => {
+  const store = storage();
+  store.values['citylink:watched:default:previews'] = { 1: { url: '', at: Date.now() } };
+  let requests = 0;
+  const app = await setup(row(1), { store, fetch: async () => {
+    requests++;
+    return { ok: true, text: async () => '<div class="message-body"><a href="https://goonbox.cr/img/x"><img data-url="https://cdn.example/actual.md.jpg"></a></div>' };
+  } });
+  try {
+    app.reveal(); await tick(); await tick();
+    assert.equal(requests, 1);
+    assert.equal(app.$('[data-preview-id="1"] img').src, 'https://cdn.example/actual.md.jpg');
+  } finally { app.dom.window.close(); }
+});

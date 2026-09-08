@@ -426,7 +426,7 @@
     $('[data-prev]').disabled = displayPage <= 1;
     $('[data-next]').disabled = displayPage >= totalPages;
     items.querySelectorAll('[data-preview-id]').forEach(box => {
-      if (previews.has(box.dataset.previewId)) paintPreview(box, imageUrl(previews.get(box.dataset.previewId).url));
+      if (previews.get(box.dataset.previewId)?.url) paintPreview(box, imageUrl(previews.get(box.dataset.previewId).url));
       else previewObserver?.observe(box);
     });
   }
