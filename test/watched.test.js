@@ -32,10 +32,19 @@ async function setup(html, options = {}) {
     url: 'https://simpcity.cr/watched/threads', runScripts: 'outside-only', pretendToBeVisual: true,
   });
   dom.window.chrome = { storage: store.api };
+  const observed = new Set();
+  let onIntersection;
+  dom.window.IntersectionObserver = class {
+    constructor(callback) { onIntersection = callback; }
+    observe(element) { observed.add(element); }
+    unobserve(element) { observed.delete(element); }
+    disconnect() { observed.clear(); }
+  };
   dom.window.fetch = options.fetch || (async () => { throw new Error('unexpected fetch'); });
   await dom.window.eval(script);
   const shadow = dom.window.document.querySelector('#citylink-watched').shadowRoot;
-  return { dom, shadow, store, $: selector => shadow.querySelector(selector) };
+  return { dom, shadow, store, $: selector => shadow.querySelector(selector),
+    reveal: () => onIntersection([...observed].map(target => ({ target, isIntersecting: true }))) };
 }
 
 test('defaults to folder cards, with bounded thread pages and native view available', async () => {
@@ -129,5 +138,73 @@ test('failed pages expose incomplete-search notice and can be retried', async ()
     fail = false; app.$('[data-retry]').click(); await tick();
     assert.equal(app.$('[data-partial]').hidden, true);
     assert.match(app.$('[data-status]').textContent, /2 threads · 2\/2/);
+  } finally { app.dom.window.close(); }
+});
+
+test('folder previews show three recent threads; visible covers fetch once and reuse the image in cards', async () => {
+  const urls = [];
+  const app = await setup(Array.from({ length: 5 }, (_, i) => row(i + 1)).join(''), { fetch: async url => {
+    urls.push(String(url));
+    return { ok: true, text: async () => `<img src="/logo.png"><div class="message-body"><div class="bbWrapper">
+      <div class="bbCodeBlock--quote"><img src="https://images.example/quote.jpg"></div>
+      <img class="smilie" src="/smilies/smile.png"><img width="16" src="/tiny.png">
+      <img data-src="https://images.example/cover.jpg" src="data:image/gif;base64,AA==">
+      </div></div>` };
+  } });
+  try {
+    assert.equal(urls.length, 0, 'offscreen previews do not fetch thread pages');
+    assert.deepEqual([...app.shadow.querySelectorAll('.folder-entry-title')].map(el => el.textContent), ['Thread 5', 'Thread 4', 'Thread 3']);
+    app.reveal(); await tick(); await tick();
+    assert.equal(urls.length, 3);
+    assert.ok(urls.every(url => /^https:\/\/simpcity.cr\/threads\/topic\.\d+\/$/.test(url)), 'use canonical first page, not unread route');
+    assert.equal(app.$('.preview img').src, 'https://images.example/cover.jpg');
+    assert.equal(app.$('.preview img').referrerPolicy, 'no-referrer');
+    app.$('.folder').click();
+    assert.equal(app.$('.card .preview img').src, 'https://images.example/cover.jpg');
+    assert.equal(urls.length, 3, 'cached previews survive rerendering');
+    const img = app.$('.preview img'); img.dispatchEvent(new app.dom.window.Event('error'));
+    assert.equal(app.$('.card .preview').querySelector('img'), null);
+    assert.match(app.$('.preview-caption').textContent, /unavailable/);
+  } finally { app.dom.window.close(); }
+});
+
+test('preview loading limits concurrency and drops offscreen jobs after navigation', async () => {
+  const pending = [];
+  const app = await setup(Array.from({ length: 6 }, (_, i) => row(i + 1)).join(''), {
+    fetch: url => new Promise(resolve => pending.push({ url, resolve })),
+  });
+  try {
+    app.$('[data-section="all"]').click(); app.reveal();
+    assert.equal(pending.length, 2);
+    app.$('[data-section="favourites"]').click();
+    for (const request of pending) request.resolve({ ok: true, text: async () => '<div class="message-body">No images</div>' });
+    await tick(); await tick();
+    assert.equal(pending.length, 2, 'removed cards must not keep fetching the rest of the page');
+    app.$('[data-section="all"]').click();
+    assert.equal(app.$('.preview-caption').textContent, 'No preview');
+  } finally { app.dom.window.close(); }
+});
+
+test('preview cache persists across page loads, expires, and rejects unsafe image URLs', async () => {
+  const store = storage();
+  store.values['citylink:watched:default:previews'] = {
+    1: { url: 'https://images.example/cached.jpg', at: Date.now() },
+    2: { url: 'https://images.example/expired.jpg', at: Date.now() - 8 * 86400000 },
+    3: { url: 'javascript:alert(1)', at: Date.now() },
+  };
+  const requests = [];
+  const app = await setup(row(1) + row(2) + row(3), { store, fetch: async url => {
+    requests.push(url);
+    return { ok: true, text: async () => '<div class="message-body"><div class="bbWrapper"><img src="javascript:alert(1)"><img src="http://insecure.example/img.jpg"></div></div>' };
+  } });
+  try {
+    assert.equal(app.$('[data-preview-id="1"] img').src, 'https://images.example/cached.jpg');
+    assert.equal(app.$('[data-preview-id="2"] img'), null);
+    assert.equal(app.$('[data-preview-id="3"] img'), null);
+    app.reveal(); await tick(); await tick();
+    assert.equal(requests.length, 1);
+    assert.equal(app.$('[data-preview-id="2"] .preview-caption').textContent, 'No preview');
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.equal(store.values['citylink:watched:default:previews'][2].url, '');
   } finally { app.dom.window.close(); }
 });

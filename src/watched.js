@@ -13,6 +13,18 @@
   const namespace = `citylink:watched:${encodeURIComponent(account)}:`;
   const stateKey = namespace + 'view';
   const favouritePrefix = namespace + 'favourite:';
+  const previewKey = namespace + 'previews';
+  const previews = new Map();
+  const previewJobs = new Map();
+  let previewActive = 0;
+  let previewSaveTimer;
+  const previewObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      previewObserver.unobserve(entry.target);
+      queuePreview(entry.target);
+    }
+  }, { rootMargin: '150px' }) : null;
   const favourites = new Set();
   const saving = new Set();
   const pages = new Map();
@@ -113,6 +125,10 @@
 
   try {
     const values = await chrome.storage.local.get(null);
+    for (const [id, entry] of Object.entries(values[previewKey] || {})) {
+      if (entry && typeof entry.url === 'string' && Number.isFinite(entry.at) &&
+        Date.now() - entry.at < (entry.url ? 7 * 86400000 : 3600000)) previews.set(id, entry);
+    }
     Object.entries(values).forEach(([key, value]) => { if (key.startsWith(favouritePrefix) && value === true) favourites.add(key.slice(favouritePrefix.length)); });
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
@@ -142,6 +158,89 @@
   }
   function safeLink(value) {
     try { const url = new URL(value, location.href); return url.origin === location.origin ? url.href : ''; } catch { return ''; }
+  }
+  function imageUrl(value, base = location.href) {
+    if (!value) return '';
+    try {
+      const url = new URL(value, base);
+      return url.protocol === 'https:' && !url.username && !url.password ? url.href : '';
+    } catch { return ''; }
+  }
+  function findPreview(doc, base) {
+    // Only post content: avatars, site logos and embedded-player controls are not covers.
+    for (const img of doc.querySelectorAll('.message-body .bbWrapper img, .message-body img.bbImage')) {
+      if (img.closest('.bbCodeBlock--quote, .bbCodeBlock--spoiler') ||
+        /smilie|emoji|avatar/i.test(img.className) ||
+        (img.getAttribute('width') && Number(img.getAttribute('width')) < 80)) continue;
+      for (const value of [img.getAttribute('data-src'), img.getAttribute('data-url'), img.getAttribute('src')]) {
+        const url = imageUrl(value, base);
+        if (url && !/\/(?:smilies|emoji|avatars)\//i.test(new URL(url).pathname)) return url;
+      }
+    }
+    return '';
+  }
+  function preview(record, small = false) {
+    const box = document.createElement('span');
+    box.className = `preview${small ? ' preview-small' : ''}`;
+    box.dataset.previewId = record.id;
+    // Fetch the canonical first page rather than an /unread URL that can jump between pages.
+    box.dataset.previewUrl = record.url.replace(/(\/threads\/[^/?#]+\.\d+)(?:\/[^?#]*)?(?:[?#].*)?$/, '$1/');
+    box.append(text('span', record.title.trim().slice(0, 1).toUpperCase(), 'preview-initial'));
+    box.append(text('span', 'Preview', 'preview-caption'));
+    box.setAttribute('aria-hidden', 'true');
+    return box;
+  }
+  function paintPreview(box, url) {
+    if (!box.isConnected) return;
+    box.querySelector('img')?.remove();
+    box.classList.remove('has-image');
+    box.querySelector('.preview-caption').textContent = url ? 'Preview' : 'No preview';
+    if (!url) return;
+    const img = document.createElement('img');
+    img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.referrerPolicy = 'no-referrer';
+    img.addEventListener('load', () => box.classList.add('has-image'), { once: true });
+    img.addEventListener('error', () => {
+      img.remove(); box.classList.remove('has-image');
+      box.querySelector('.preview-caption').textContent = 'Preview unavailable';
+      rememberPreview(box.dataset.previewId, '');
+    }, { once: true });
+    img.src = url; box.append(img);
+  }
+  function rememberPreview(id, url) {
+    previews.set(id, { url, at: Date.now() });
+    clearTimeout(previewSaveTimer);
+    previewSaveTimer = setTimeout(() => {
+      const entries = [...previews].sort(([, a], [, b]) => b.at - a.at).slice(0, 600);
+      chrome.storage.local.set({ [previewKey]: Object.fromEntries(entries) }).catch(() => {});
+    }, 300);
+  }
+  function queuePreview(box) {
+    const id = box.dataset.previewId;
+    if (previews.has(id)) { paintPreview(box, imageUrl(previews.get(id).url)); return; }
+    if (!previewJobs.has(id)) previewJobs.set(id, { url: box.dataset.previewUrl, boxes: new Set(), running: false });
+    previewJobs.get(id).boxes.add(box);
+    drainPreviews();
+  }
+  function drainPreviews() {
+    for (const [id, job] of previewJobs) {
+      if (previewActive >= 2) break;
+      if (job.running) continue;
+      if (![...job.boxes].some(box => box.isConnected)) { previewJobs.delete(id); continue; }
+      job.running = true; previewActive++;
+      (async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+        let url = '';
+        try {
+          const response = await fetch(job.url, { credentials: 'same-origin', signal: controller.signal });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          url = findPreview(new DOMParser().parseFromString(await response.text(), 'text/html'), job.url);
+        } catch { /* Keep the title and fallback usable when a post cannot be fetched. */ }
+        finally { clearTimeout(timer); }
+        rememberPreview(id, url);
+        for (const box of job.boxes) paintPreview(box, url);
+      })().finally(() => { previewJobs.delete(id); previewActive--; drainPreviews(); });
+    }
   }
   function rebuild() {
     const seen = new Set();
@@ -221,7 +320,10 @@
     const bottom = document.createElement('div'); bottom.className = 'card-bottom';
     const latest = text('a', record.latestText); latest.href = record.latestUrl; latest.title = 'Open latest post';
     bottom.append(text('span', record.author || 'Thread', 'author'), latest);
-    item.append(top, title, bottom);
+    const cover = document.createElement('a'); cover.className = 'cover'; cover.href = record.url;
+    cover.setAttribute('aria-label', `Open thread: ${record.title}`);
+    cover.append(preview(record));
+    item.append(cover, top, title, bottom);
     return item;
   }
 
@@ -244,6 +346,7 @@
     $('.controls').hidden = folders;
     $('[data-heading]').textContent = query ? 'Search results · all folders' :
       ({ folders: 'Your folders', all: 'All threads', favourites: 'Favourites', unread: 'Unread threads', folder: state.folder })[state.section];
+    previewObserver?.disconnect();
     const items = $('.items'); items.replaceChildren();
     items.className = `items ${folders ? 'folders' : state.layout}`;
     let results;
@@ -271,6 +374,13 @@
       const icon = text('span', '', 'folder-icon'); icon.setAttribute('aria-hidden', 'true');
       icon.innerHTML = '<svg width="30" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/><path d="M3 9h18"/></svg>';
       button.append(icon, text('strong', category), text('span', `${rows.length} threads · ${rows.filter(row => row.unread).length} unread`, 'muted'));
+      const contents = document.createElement('span'); contents.className = 'folder-contents';
+      [...rows].sort((a, b) => b.updated - a.updated || a.title.localeCompare(b.title)).slice(0, 3).forEach(record => {
+        const entry = document.createElement('span'); entry.className = 'folder-entry';
+        entry.append(preview(record, true), text('span', record.title, 'folder-entry-title'));
+        contents.append(entry);
+      });
+      button.append(contents);
       button.setAttribute('aria-label', `Open folder ${category} (${rows.length} threads)`);
       button.addEventListener('click', () => change({ section: 'folder', folder: category })); items.append(button);
     });
@@ -283,6 +393,10 @@
     $('[data-page]').textContent = `Page ${displayPage} of ${totalPages}`;
     $('[data-prev]').disabled = displayPage <= 1;
     $('[data-next]').disabled = displayPage >= totalPages;
+    items.querySelectorAll('[data-preview-id]').forEach(box => {
+      if (previews.has(box.dataset.previewId)) paintPreview(box, imageUrl(previews.get(box.dataset.previewId).url));
+      else previewObserver?.observe(box);
+    });
   }
 
   function styles() {
@@ -298,10 +412,12 @@
       .results-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:20px 0 16px}.controls{display:flex;gap:12px;font-size:12px}.controls label{display:flex;align-items:center;gap:7px;color:var(--muted)}select{background:#242a34;color:#eef2f7;border:1px solid var(--line);border-radius:7px;padding:7px;max-width:180px}.back{font-size:12px;border:0;background:none;padding:0;margin-bottom:8px;color:var(--accent)}
       .items{display:grid;gap:12px}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}.folder{display:flex;flex-direction:column;align-items:flex-start;padding:18px;text-align:left;gap:5px;min-width:0}.folder strong{font-size:16px;overflow-wrap:anywhere}.folder-icon{color:var(--accent);font-size:34px;line-height:1.1;margin-bottom:10px}
       .card{min-width:0;border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:10px;background:rgba(128,145,170,.045)}.card:hover{border-color:rgba(120,180,230,.55)}.card-top{display:flex;align-items:center;gap:8px;min-width:0}.tag{color:var(--muted);font-size:11px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.unread{font-size:10px;color:var(--accent)}.unread:before{content:'● ';font-size:8px}.star{margin-left:auto;padding:0;width:30px;height:30px;flex-shrink:0;font-size:23px;line-height:1;border-color:transparent;background:transparent;color:var(--muted)}.star[aria-pressed=true]{color:#efc668}
+      .cover{display:block;border-radius:7px;overflow:hidden}.preview{position:relative;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;width:100%;aspect-ratio:16/10;overflow:hidden;background:linear-gradient(135deg,rgba(95,155,215,.2),rgba(155,115,190,.1));color:var(--muted)}.preview-initial{font-size:32px;color:var(--accent);opacity:.7}.preview-caption{font-size:10px}.preview img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .15s}.preview.has-image img{opacity:1}.preview.has-image .preview-initial,.preview.has-image .preview-caption{visibility:hidden}
+      .folder-contents{display:flex;flex-direction:column;gap:9px;border-top:1px solid var(--line);padding-top:12px;margin-top:8px;width:100%}.folder-entry{display:flex;align-items:center;gap:10px;min-width:0}.preview-small{width:48px;height:48px;aspect-ratio:1;border-radius:6px;flex-shrink:0}.preview-small .preview-initial{font-size:20px}.preview-small .preview-caption{display:none}.folder-entry-title{font-size:12px;line-height:1.4;font-weight:400;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
       .thread-title{font-size:15px;font-weight:650;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-height:44px}.card-bottom{display:flex;gap:12px;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:auto}.author{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-bottom a{flex-shrink:0}
-      .compact{grid-template-columns:1fr}.compact .card{display:grid;grid-template-columns:160px minmax(0,1fr) 190px;align-items:center;gap:16px;padding:10px 14px}.compact .thread-title{min-height:0}.compact .card-bottom{margin:0;flex-direction:column;gap:2px;text-align:right}
+      .compact{grid-template-columns:1fr}.compact .card{display:grid;grid-template-columns:64px 140px minmax(0,1fr) 190px;align-items:center;gap:16px;padding:10px 14px}.compact .cover .preview{aspect-ratio:1}.compact .cover .preview-caption{display:none}.compact .thread-title{min-height:0}.compact .card-bottom{margin:0;flex-direction:column;gap:2px;text-align:right}
       footer{display:flex;justify-content:center;align-items:center;gap:20px;margin-top:24px;font-size:12px}.empty{padding:40px 12px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:10px}.notice{padding:12px;margin-top:12px;border:1px solid #aa8344;border-radius:8px;color:#dcb772}.notice button{margin-left:8px;font-size:12px}
-      @media(max-width:700px){.library{padding:16px}header{align-items:flex-start}h2{font-size:22px}header button{max-width:110px}.results-head{align-items:flex-start;flex-direction:column}.controls{flex-wrap:wrap}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}.compact .card{grid-template-columns:1fr}.compact .card-bottom{flex-direction:row;text-align:left}nav{gap:3px}nav button{padding:7px 9px}.search-row{flex-wrap:wrap}}
+      @media(max-width:700px){.library{padding:16px}header{align-items:flex-start}h2{font-size:22px}header button{max-width:110px}.results-head{align-items:flex-start;flex-direction:column}.controls{flex-wrap:wrap}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}.compact .card{grid-template-columns:64px minmax(0,1fr);gap:8px 12px}.compact .cover{grid-row:1/4}.compact .card-bottom{flex-direction:row;text-align:left;grid-column:2}.compact .thread-title{grid-column:2}nav{gap:3px}nav button{padding:7px 9px}.search-row{flex-wrap:wrap}}
       :host([data-theme=light]){--muted:#687486;--accent:#2474b5}:host([data-theme=light]) select{background:#fff;color:#243345}
     `;
   }

@@ -21,6 +21,13 @@ use memory in the forum tab; upstream's unzipped mode avoids building one large 
 The watched page opens on category folders. Open a folder to see compact cards,
 or use All threads, Favourites and Unread. Search spans all loaded pages and folders;
 each view shows at most 24 items per page. A compact list layout is also available.
+Folders preview their three most recently updated threads with thumbnails and titles.
+Thread cards have image covers, and compact rows keep a small thumbnail. Previews load
+the first thread page only when near the viewport, with at most two preview requests
+at once. The first eligible image in post content is used; avatars, quoted images and
+spoiler images are excluded. Covers are cached locally for seven days (missing or failed
+previews for one hour), with a title initial as fallback. Fetching thread pages may
+affect the forum's read tracking; the unread count reflects the loaded watched list.
 Stars persist in extension-local storage and follow the thread ID even after a rename.
 View/search/page state is remembered in the current tab. Original forum view restores
 the native current-page list and bulk-management controls. Failed page loads show an
