@@ -221,3 +221,12 @@ test('preview extraction covers OpenGraph, attachment links, and lazy image fiel
     assert.equal(app.$('.preview img').src, 'https://images.example/og.jpg');
   } finally { app.dom.window.close(); }
 });
+
+test('preview extraction accepts extensionless Goonbox image links', async () => {
+  const app = await setup(row(1), { fetch: async () => ({ ok: true, text: async () => `
+    <div class="message-body"><a class="link link--external" href="https://goonbox.cr/img/ak9Rgzm"></a></div>` }) });
+  try {
+    app.reveal(); await tick(); await tick();
+    assert.equal(app.$('.preview img').src, 'https://goonbox.cr/img/ak9Rgzm');
+  } finally { app.dom.window.close(); }
+});

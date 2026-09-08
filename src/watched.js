@@ -188,7 +188,8 @@
     for (const link of doc.querySelectorAll('.message-body a[href], .attachment a[href], .attachment--image a[href], a.js-lbImage-attachment')) {
       const href = link.getAttribute('href') || '';
       const dataHref = link.getAttribute('data-url') || link.getAttribute('data-src') || href;
-      if (/\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(href) || /attachment|image|lightbox|media/i.test(link.className)) add(dataHref);
+      if (/\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(href) ||
+        /(?:goonbox\.[^/]+\/img\/|attachment|image|lightbox|media)/i.test(`${href} ${link.className}`)) add(dataHref);
     }
     for (const media of doc.querySelectorAll('.message-body video[poster], .message-body iframe[data-src], .message-body [data-preview-url]')) {
       add(media.getAttribute('poster') || media.getAttribute('data-preview-url') || media.getAttribute('data-src'));
