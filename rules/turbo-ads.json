@@ -1,0 +1,18 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "initiatorDomains": ["turbo.cr"],
+      "requestDomains": [
+        "bucklechemistdensity.com",
+        "demandingoverdriveunthread.com",
+        "ruhoxlli.in",
+        "holahupa.com",
+        "armlessfancyunzip.com"
+      ],
+      "resourceTypes": ["script", "sub_frame", "xmlhttprequest", "ping", "image"]
+    }
+  }
+]

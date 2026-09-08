@@ -1,0 +1,50 @@
+{
+  "commit": "07597429bd69968e5fa737ecc920c94fc0d26e6e",
+  "retrievedAt": "2026-09-08T12:27:03.981Z",
+  "files": {
+    "forum-post-downloader.user.js": {
+      "url": "https://raw.githubusercontent.com/SkyCloudDev/ForumPostDownloader/07597429bd69968e5fa737ecc920c94fc0d26e6e/dist/build.user.js",
+      "sha256": "d8794e49bf41ba9e2d4fd48ce3c58a56b4a17090f76926c5af44cbed150f626c"
+    },
+    "popper.min.js": {
+      "url": "https://unpkg.com/@popperjs/core@2.11.8/dist/umd/popper.min.js",
+      "sha256": "c212f4b505a86352aed62b24a8f16f999f821ecbe6456c7f3c8a04bc87968782"
+    },
+    "tippy.min.js": {
+      "url": "https://unpkg.com/tippy.js@6.3.7/dist/tippy-bundle.umd.min.js",
+      "sha256": "3f0fe70eb26ccf28f6887a192e29d38dd7ef7c2f079a73304ad42ddc7bed37de"
+    },
+    "file-saver.min.js": {
+      "url": "https://unpkg.com/file-saver@2.0.4/dist/FileSaver.min.js",
+      "sha256": "1433b8feb185bd8e81db7d2d1ea7330140531b72158300f8e26c98df1e853b21"
+    },
+    "jszip.min.js": {
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js",
+      "sha256": "3d9fcebdd5f1116d6ede7b930140928dde25c9aa09dd4269bff5f5d71d868b97"
+    },
+    "sha256.min.js": {
+      "url": "https://raw.githubusercontent.com/geraintluff/sha256/gh-pages/sha256.min.js",
+      "sha256": "60869fc7dc254d82ba087334718d790dbcaa20dda903f632e10a4caf07fd0a98"
+    },
+    "popper.LICENSE.txt": {
+      "url": "https://unpkg.com/@popperjs/core@2.11.8/LICENSE.md",
+      "sha256": "bf67e2c9b7974543bb18ced3a0b37f53729aaff953b442dd89a3adaf90fd93e8"
+    },
+    "tippy.LICENSE.txt": {
+      "url": "https://unpkg.com/tippy.js@6.3.7/LICENSE",
+      "sha256": "7f4929c55f525ae510a77c361496c5a86a092434a3681c95a4dc89e951c67e98"
+    },
+    "file-saver.LICENSE.txt": {
+      "url": "https://unpkg.com/file-saver@2.0.4/LICENSE.md",
+      "sha256": "2d1d7a93b46e4274355ac2904428707c4ee47ee8c6029fa394ebf405648d3f63"
+    },
+    "jszip.LICENSE.txt": {
+      "url": "https://unpkg.com/jszip@3.1.5/LICENSE.markdown",
+      "sha256": "14450c78405ad2a2173e25740b56406556779149df9c4c83523a8c63d0686210"
+    },
+    "sha256.LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/geraintluff/sha256/gh-pages/README.md",
+      "sha256": "f4f73027ecb04b1b8e9fb044f2e1fc9ec4d7799e2802c2eac8f27fb5d04208ab"
+    }
+  }
+}

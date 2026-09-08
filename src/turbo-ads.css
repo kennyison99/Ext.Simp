@@ -1,0 +1,7 @@
+/* Observed Turbo click overlays and the root-level Close Ad iframe. */
+[data-cl-overlay],
+html > iframe:not([src]),
+html > iframe[src="about:blank"] {
+  display: none !important;
+  pointer-events: none !important;
+}

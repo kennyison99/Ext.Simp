@@ -1,0 +1,16 @@
+{
+  "name": "simpcity-link-collector",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension for watched thread folders, favourites and ForumPostDownloader.",
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check.mjs",
+    "build": "node scripts/build-downloader.mjs",
+    "vendor:update": "node scripts/vendor-upstream.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
