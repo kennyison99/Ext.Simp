@@ -13,16 +13,20 @@
   const namespace = `citylink:watched:${encodeURIComponent(account)}:`;
   const stateKey = namespace + 'view';
   const favouritePrefix = namespace + 'favourite:';
-  const previewKey = namespace + 'previews';
-  const previews = new Map();
-  const previewJobs = new Map();
-  let previewActive = 0;
-  let previewSaveTimer;
-  const previewObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+  const coverPrefix = namespace + 'cover:';
+  const cooldownKey = `citylink:watched:cooldown:${location.origin}`;
+  const covers = new Map();
+  const brokenNative = new Set();
+  const coverQueue = new Map();
+  let coverRunning = false;
+  let nextCoverAt = 0;
+  let coverTimer;
+  let cooldownUntil = 0;
+  const coverObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
-      previewObserver.unobserve(entry.target);
-      queuePreview(entry.target);
+      coverObserver.unobserve(entry.target);
+      queueCover(entry.target);
     }
   }, { rootMargin: '150px' }) : null;
   const favourites = new Set();
@@ -60,9 +64,9 @@
   shadow.innerHTML = `
     <style>${styles()}</style>
     <div class="library">
-      <header><div><div class="eyebrow">CITYLINK / YOUR LIBRARY</div><h2>Watched threads</h2>
+      <header><div><h2>Watched threads</h2>
         <p class="muted" data-status role="status" aria-live="polite"></p></div>
-        <button type="button" data-original>Original forum view</button></header>
+        <button type="button" data-original>Forum view</button></header>
       <div class="workspace">
         <div class="search-row"><label class="search"><span aria-hidden="true">⌕</span>
           <input type="search" placeholder="Search titles, tags or authors…" aria-label="Search all watched threads">
@@ -119,21 +123,30 @@
     nativeView = !nativeView;
     original.style.display = nativeView ? originalDisplay : 'none';
     $('.workspace').hidden = nativeView;
+    if (!nativeView) render();
     $('[data-original]').textContent = nativeView ? 'Back to CityLink' : 'Original forum view';
   });
   $('[data-retry]').addEventListener('click', () => loadPages([...failed]));
 
   try {
     const values = await chrome.storage.local.get(null);
-    for (const [id, entry] of Object.entries(values[previewKey] || {})) {
-      if (entry && typeof entry.url === 'string' && Number.isFinite(entry.at) &&
-        Date.now() - entry.at < (entry.url ? 7 * 86400000 : 3600000)) previews.set(id, entry);
+    cooldownUntil = Number(values[cooldownKey]) || 0;
+    for (const [key, value] of Object.entries(values)) {
+      if (key.startsWith(coverPrefix) && validCover(value)) covers.set(key.slice(coverPrefix.length), value);
+    }
+    for (const [id, value] of Object.entries(values[namespace + 'previews'] || {})) {
+      if (!covers.has(id) && validCover(value)) covers.set(id, value);
     }
     Object.entries(values).forEach(([key, value]) => { if (key.startsWith(favouritePrefix) && value === true) favourites.add(key.slice(favouritePrefix.length)); });
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
       let changed = false;
       for (const [key, value] of Object.entries(changes)) {
+        if (key === cooldownKey) cooldownUntil = Math.max(cooldownUntil, Number(value.newValue) || 0);
+        if (key.startsWith(coverPrefix)) {
+          const id = key.slice(coverPrefix.length);
+          if (validCover(value.newValue)) covers.set(id, value.newValue); else covers.delete(id);
+        }
         if (!key.startsWith(favouritePrefix)) continue;
         const id = key.slice(favouritePrefix.length);
         if (saving.has(id)) continue;
@@ -166,112 +179,134 @@
       return url.protocol === 'https:' && !url.username && !url.password ? url.href : '';
     } catch { return ''; }
   }
-  function findPreview(doc, base) {
-    const candidates = [];
-    const add = value => {
-      const url = imageUrl(value, base);
-      if (!url || candidates.includes(url)) return;
-      const parsed = new URL(url);
-      if (/\/(?:smilies|emoji|avatars|emoticons)\//i.test(parsed.pathname) ||
-        /(?:avatar|smilie|emoji|reaction)/i.test(parsed.pathname + parsed.search)) return;
-      candidates.push(url);
-    };
-    // Prefer an explicit forum attachment or the page's OpenGraph image.
-    doc.querySelectorAll('meta[property="og:image"], meta[name="twitter:image"]').forEach(meta => add(meta.content));
-    for (const img of doc.querySelectorAll('.message-body img, .attachment--image img, .bbImage')) {
-      if (img.closest('.bbCodeBlock--quote, .bbCodeBlock--spoiler') ||
-        /smilie|emoji|avatar/i.test(String(img.className)) ||
-        (img.getAttribute('width') && Number(img.getAttribute('width')) < 80)) continue;
-      for (const value of [img.getAttribute('data-src'), img.getAttribute('data-original'), img.getAttribute('data-lazy-src'), img.getAttribute('data-url'), img.currentSrc, img.getAttribute('src')]) add(value);
+  function findPreview(row) {
+    // Prefer media already present in the watched list.
+    // The forum uses an avatar wrapper and a transparent src for thread thumbnails.
+    for (const media of row.querySelectorAll('.dcThumbnail img, .dcThumbnail')) {
+      const background = media.style.backgroundImage.match(/^url\(["']?(.*?)["']?\)$/)?.[1];
+      const url = imageUrl(background) || imageUrl(media.getAttribute('data-src')) || imageUrl(media.getAttribute('src'));
+      if (url) return url;
     }
-    // Some forum hosts render an image as a normal attachment link without an img tag.
-    for (const link of doc.querySelectorAll('.message-body a[href], .attachment a[href], .attachment--image a[href], a.js-lbImage-attachment')) {
-      const href = link.getAttribute('href') || '';
-      const dataHref = link.getAttribute('data-url') || link.getAttribute('data-src') || href;
-      if (/\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(href) ||
-        /(?:goonbox\.[^/]+\/img\/|attachment|image|lightbox|media)/i.test(`${href} ${link.className}`)) add(dataHref);
+    const candidates = row.querySelectorAll('[data-preview-url], [data-thumbnail-url], video[poster], img, picture source');
+    for (const media of candidates) {
+      if (media.closest('.avatar, .structItem-cell--latest') ||
+        /avatar|smilie|emoji|reaction/i.test(String(media.className))) continue;
+      const srcset = media.getAttribute('data-srcset') || media.getAttribute('srcset') || '';
+      for (const value of [
+        media.getAttribute('data-preview-url'), media.getAttribute('data-thumbnail-url'),
+        media.getAttribute('poster'), media.getAttribute('data-src'),
+        media.getAttribute('data-original'), media.getAttribute('data-lazy-src'),
+        media.getAttribute('data-url'), ...srcset.split(',').map(part => part.trim().split(/\s+/)[0]),
+        media.currentSrc, media.getAttribute('src'),
+      ]) {
+        const url = imageUrl(value);
+        if (url && !/avatar|smilie|emoji|reaction|placeholder|spacer|transparent/i.test(new URL(url).pathname)) return url;
+      }
     }
-    for (const media of doc.querySelectorAll('.message-body video[poster], .message-body iframe[data-src], .message-body [data-preview-url]')) {
-      add(media.getAttribute('poster') || media.getAttribute('data-preview-url') || media.getAttribute('data-src'));
-    }
-    return candidates[0] || '';
+    return '';
   }
   function preview(record, small = false) {
     const box = document.createElement('span');
     box.className = `preview${small ? ' preview-small' : ''}`;
     box.dataset.previewId = record.id;
-    box.dataset.previewTitle = record.title;
-    // Fetch the canonical first page rather than an /unread URL that can jump between pages.
-    box.dataset.previewUrl = record.url.replace(/(\/threads\/[^/?#]+\.\d+)(?:\/[^?#]*)?(?:[?#].*)?$/, '$1/');
-    box.dataset.previewLatestUrl = record.latestUrl || box.dataset.previewUrl;
-    box.append(text('span', record.title.trim().slice(0, 2).toUpperCase(), 'preview-initial'));
-    box.append(text('span', 'Preview', 'preview-caption'));
+    box.dataset.threadUrl = record.url.replace(/(\/threads\/[^/?#]+\.\d+)(?:\/[^?#]*)?(?:[?#].*)?$/, '$1/');
     box.setAttribute('aria-hidden', 'true');
+    box.append(text('span', record.title.trim().slice(0, 2).toUpperCase(), 'preview-initial'));
+    const nativeUrl = brokenNative.has(record.id) ? '' : record.previewUrl;
+    const cached = covers.get(record.id);
+    const url = nativeUrl || (validCover(cached) ? cached.url : '');
+    if (url) paintCover(box, url, !!nativeUrl);
+    else box.dataset.needsCover = 'true';
     return box;
   }
-  function paintPreview(box, url) {
-    if (!box.isConnected) return;
-    box.querySelector('img')?.remove();
-    box.classList.remove('has-image');
-    const fallback = !url;
-    const source = url || placeholderUrl(box.dataset.previewTitle || '?');
-    box.querySelector('.preview-caption').textContent = fallback ? 'Generated cover' : 'Preview';
-    const img = document.createElement('img');
-    img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.referrerPolicy = 'no-referrer';
-    img.addEventListener('load', () => { box.classList.add('has-image'); if (fallback) box.classList.add('generated'); }, { once: true });
-    img.addEventListener('error', () => {
-      if (!fallback) { rememberPreview(box.dataset.previewId, ''); paintPreview(box, ''); }
-    }, { once: true });
-    img.src = source; box.append(img);
+  function paintCover(box, url, native = false) {
+      box.querySelector('img')?.remove();
+      delete box.dataset.needsCover;
+      const img = document.createElement('img');
+      img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.referrerPolicy = 'no-referrer';
+      img.addEventListener('load', () => box.classList.add('has-image'), { once: true });
+      img.addEventListener('error', () => {
+        img.remove(); box.classList.remove('has-image');
+        if (!native) { rememberCover(box.dataset.previewId, ''); return; }
+        brokenNative.add(box.dataset.previewId);
+        box.dataset.needsCover = 'true';
+        observeCover(box);
+      }, { once: true });
+      img.src = url; box.append(img);
   }
-  function placeholderUrl(title) {
-    const label = String(title || '?').trim().slice(0, 2).toUpperCase() || '?';
-    const hue = [...label].reduce((sum, character) => sum + character.charCodeAt(0), 0) % 360;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="hsl(${hue} 56% 30%)"/><stop offset="1" stop-color="hsl(${(hue + 55) % 360} 46% 18%)"/></linearGradient></defs><rect width="640" height="400" fill="url(#g)"/><circle cx="535" cy="72" r="130" fill="white" opacity=".06"/><text x="320" y="225" text-anchor="middle" dominant-baseline="middle" font-family="system-ui,sans-serif" font-size="108" font-weight="700" fill="white" opacity=".82">${escapeXml(label)}</text></svg>`;
-    return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+  function validCover(entry) {
+    return !!entry && typeof entry.url === 'string' && (!entry.url || !!imageUrl(entry.url)) &&
+      Number.isFinite(entry.at) && (entry.url !== '' || (entry.at <= Date.now() && Date.now() - entry.at < 3600000));
   }
-  function escapeXml(value) { return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[character])); }
-  function rememberPreview(id, url) {
-    previews.set(id, { url, at: Date.now() });
-    clearTimeout(previewSaveTimer);
-    previewSaveTimer = setTimeout(() => {
-      const entries = [...previews].sort(([, a], [, b]) => b.at - a.at).slice(0, 600);
-      chrome.storage.local.set({ [previewKey]: Object.fromEntries(entries) }).catch(() => {});
-    }, 300);
+  function rememberCover(id, url) {
+    const entry = { url, at: Date.now() };
+    covers.set(id, entry);
+    chrome.storage.local.set({ [coverPrefix + id]: entry }).catch(() => {});
   }
-  function queuePreview(box) {
+  async function respectRateLimit(response) {
+    if (response.status !== 429) return;
+    const retry = response.headers?.get('Retry-After');
+    const delay = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry || '') - Date.now();
+    cooldownUntil = Math.max(cooldownUntil, Date.now() + Math.max(60000, Number.isFinite(delay) ? delay : 5 * 60000));
+    await chrome.storage.local.set({ [cooldownKey]: cooldownUntil }).catch(() => {});
+    $('[data-status]').textContent += ' · Requests paused; try again later';
+  }
+  function observeCover(box) {
+    if (coverObserver) coverObserver.observe(box); else queueCover(box);
+  }
+  function queueCover(box) {
+    if (!box.isConnected || nativeView) return;
     const id = box.dataset.previewId;
-    const cached = previews.get(id);
-    // Empty results are only a fallback marker; retry them so a later resolver fix
-    // or a temporarily unavailable host can recover without clearing storage.
-    if (cached?.url) { paintPreview(box, imageUrl(cached.url)); return; }
-    if (cached) previews.delete(id);
-    if (!previewJobs.has(id)) previewJobs.set(id, { urls: [box.dataset.previewLatestUrl, box.dataset.previewUrl].filter((url, index, list) => url && list.indexOf(url) === index), boxes: new Set(), running: false });
-    previewJobs.get(id).boxes.add(box);
-    drainPreviews();
+    const cached = covers.get(id);
+    if (validCover(cached)) { if (cached.url) paintCover(box, cached.url); return; }
+    if (!coverQueue.has(id)) coverQueue.set(id, new Set());
+    coverQueue.get(id).add(box);
+    drainCovers();
   }
-  function drainPreviews() {
-    for (const [id, job] of previewJobs) {
-      if (previewActive >= 2) break;
-      if (job.running) continue;
-      if (![...job.boxes].some(box => box.isConnected)) { previewJobs.delete(id); continue; }
-      job.running = true; previewActive++;
-      (async () => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 10000);
-        let url = '';
-        for (const sourceUrl of job.urls) {
-          try {
-            const response = await fetch(sourceUrl, { credentials: 'same-origin', signal: controller.signal });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            url = findPreview(new DOMParser().parseFromString(await response.text(), 'text/html'), sourceUrl);
-            if (url) break;
-          } catch { /* Try the canonical page if the latest page is unavailable. */ }
-        }
-        clearTimeout(timer);
-        rememberPreview(id, url);
-        for (const box of job.boxes) paintPreview(box, url);
-      })().finally(() => { previewJobs.delete(id); previewActive--; drainPreviews(); });
+  function postCover(doc, base) {
+    for (const media of doc.querySelectorAll('.message-body img, .attachment--image img, .message-body video[poster]')) {
+      if (media.closest('.bbCodeBlock--quote, .bbCodeBlock--spoiler') || /avatar|smilie|emoji/i.test(media.className)) continue;
+      for (const field of ['data-src', 'data-original', 'data-lazy-src', 'data-url', 'poster', 'src']) {
+        const url = imageUrl(media.getAttribute(field), base);
+        if (url && !/avatar|smilie|emoji|placeholder|spacer/i.test(new URL(url).pathname)) return url;
+      }
+    }
+    for (const link of doc.querySelectorAll('.message-body a[href], .attachment--image a[href]')) {
+      if (link.closest('.bbCodeBlock--quote, .bbCodeBlock--spoiler')) continue;
+      const url = imageUrl(link.getAttribute('href'), base);
+      if (url && /\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(url)) return url;
+    }
+    return imageUrl(doc.querySelector('meta[property="og:image"], meta[name="twitter:image"]')?.content, base);
+  }
+  async function drainCovers() {
+    if (coverRunning || loading || nativeView || Date.now() < cooldownUntil) return;
+    clearTimeout(coverTimer);
+    for (const [id, boxes] of coverQueue) {
+      for (const box of boxes) if (!box.isConnected) boxes.delete(box);
+      if (!boxes.size) { coverQueue.delete(id); continue; }
+      if (Date.now() < nextCoverAt) { coverTimer = setTimeout(drainCovers, nextCoverAt - Date.now()); return; }
+      const cached = covers.get(id);
+      if (validCover(cached)) {
+        if (cached.url) for (const box of boxes) paintCover(box, cached.url);
+        coverQueue.delete(id); continue;
+      }
+      coverRunning = true;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {
+        const url = [...boxes][0].dataset.threadUrl;
+        const response = await fetch(url, { credentials: 'same-origin', signal: controller.signal });
+        await respectRateLimit(response);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const cover = postCover(new DOMParser().parseFromString(await response.text(), 'text/html'), url);
+        rememberCover(id, cover);
+        if (cover) for (const box of boxes) if (box.isConnected) paintCover(box, cover);
+      } catch { if (Date.now() >= cooldownUntil) rememberCover(id, ''); }
+      finally {
+        clearTimeout(timeout); coverQueue.delete(id); coverRunning = false;
+        nextCoverAt = Date.now() + 1500;
+      }
+      drainCovers(); return;
     }
   }
   function rebuild() {
@@ -289,7 +324,7 @@
       const latest = element.querySelector('.structItem-latestDate, .structItem-cell--latest time');
       const author = element.dataset.author || element.querySelector('.structItem-parts .username')?.textContent.trim() || '';
       const title = link.textContent.trim();
-      return [{ id, url, title, tags, category, author, unread: element.classList.contains('is-unread'),
+      return [{ id, url, title, tags, category, author, previewUrl: findPreview(element), unread: element.classList.contains('is-unread'),
         created: timeValue(element.querySelector('.structItem-startDate time')), updated: timeValue(latest),
         latestText: latest?.textContent.trim() || 'No update date', latestUrl: safeLink(latest?.closest('a')?.getAttribute('href') || url),
         search: `${title} ${tags.join(' ')} ${category} ${forum} ${author}`.normalize('NFKC').toLowerCase() }];
@@ -302,11 +337,13 @@
     await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
       while (queue.length) {
         const page = queue.shift();
+        if (Date.now() < cooldownUntil) { failed.add(page); continue; }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 15000);
         try {
           const url = new URL(location.href); url.searchParams.set('page', page); url.hash = '';
           const response = await fetch(url, { credentials: 'same-origin', signal: controller.signal });
+          await respectRateLimit(response);
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
           const rows = [...doc.querySelectorAll('.structItemContainer .structItem--thread')];
@@ -316,7 +353,7 @@
         finally { clearTimeout(timer); render(); }
       }
     }));
-    loading = false; render();
+    loading = false; render(); drainCovers();
   }
 
   async function toggleFavourite(record) {
@@ -360,9 +397,10 @@
   }
 
   function render() {
+    coverObserver?.disconnect();
     const favouriteCount = records.filter(record => favourites.has(record.id)).length;
     const unreadCount = records.filter(record => record.unread).length;
-    $('[data-status]').textContent = `${records.length} threads · ${pages.size}/${pageCount} pages loaded${loading ? ' · Loading…' : ''}`;
+    $('[data-status]').textContent = `${records.length} threads · ${pages.size}/${pageCount} pages loaded${loading ? ' · Loading…' : ''}${Date.now() < cooldownUntil ? ' · Requests paused; try again later' : ''}`;
     $('[data-error]').hidden = !storageError; $('[data-error]').textContent = storageError;
     $('[data-partial]').hidden = !failed.size;
     $('[data-partial] span').textContent = `${failed.size} pages could not be loaded. Search and counts are incomplete.`;
@@ -378,7 +416,6 @@
     $('.controls').hidden = folders;
     $('[data-heading]').textContent = query ? 'Search results · all folders' :
       ({ folders: 'Your folders', all: 'All threads', favourites: 'Favourites', unread: 'Unread threads', folder: state.folder })[state.section];
-    previewObserver?.disconnect();
     const items = $('.items'); items.replaceChildren();
     items.className = `items ${folders ? 'folders' : state.layout}`;
     let results;
@@ -403,9 +440,7 @@
       if (!folders) { items.append(card(result)); return; }
       const [category, rows] = result;
       const button = document.createElement('button'); button.type = 'button'; button.className = 'folder';
-      const icon = text('span', '', 'folder-icon'); icon.setAttribute('aria-hidden', 'true');
-      icon.innerHTML = '<svg width="30" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/><path d="M3 9h18"/></svg>';
-      button.append(icon, text('strong', category), text('span', `${rows.length} threads · ${rows.filter(row => row.unread).length} unread`, 'muted'));
+      button.append(text('strong', category), text('span', `${rows.length} threads · ${rows.filter(row => row.unread).length} unread`, 'muted'));
       const contents = document.createElement('span'); contents.className = 'folder-contents';
       [...rows].sort((a, b) => b.updated - a.updated || a.title.localeCompare(b.title)).slice(0, 3).forEach(record => {
         const entry = document.createElement('span'); entry.className = 'folder-entry';
@@ -425,32 +460,29 @@
     $('[data-page]').textContent = `Page ${displayPage} of ${totalPages}`;
     $('[data-prev]').disabled = displayPage <= 1;
     $('[data-next]').disabled = displayPage >= totalPages;
-    items.querySelectorAll('[data-preview-id]').forEach(box => {
-      if (previews.get(box.dataset.previewId)?.url) paintPreview(box, imageUrl(previews.get(box.dataset.previewId).url));
-      else previewObserver?.observe(box);
-    });
+    if (!nativeView) items.querySelectorAll('[data-needs-cover]').forEach(observeCover);
   }
 
   function styles() {
     return `
-      :host{display:block;color:inherit;font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--line:rgba(140,150,168,.26);--muted:#939dac;--accent:#79bfff;--surface:rgba(128,145,170,.07);margin:16px 0;scroll-margin-top:80px}
+      :host{display:block;color:inherit;font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--line:rgba(140,150,168,.22);--muted:#a1a5ad;--accent:#d9dde4;--surface:rgba(128,145,170,.08);margin:24px 0;scroll-margin-top:80px}
       *{box-sizing:border-box}[hidden]{display:none!important}button,input,select{font:inherit}button,a,input,select{-webkit-tap-highlight-color:transparent}
-      button{cursor:pointer;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:8px 12px}button:hover{border-color:var(--accent);background:rgba(100,170,230,.1)}button:disabled{opacity:.45;cursor:default}
+      button{cursor:pointer;color:inherit;background:transparent;border:1px solid var(--line);border-radius:5px;padding:8px 12px}button:hover{background:var(--surface)}button:disabled{opacity:.45;cursor:default}
       button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}a{color:inherit;text-decoration:none}a:hover{text-decoration:underline}
-      .library{border:1px solid var(--line);border-radius:14px;padding:24px;background:var(--surface)}header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}header button{font-size:12px}
-      h2{font-size:26px;letter-spacing:-.7px;margin:2px 0 5px}h3{font-size:18px;margin:0 0 2px}.eyebrow{font-size:10px;font-weight:700;letter-spacing:1.8px;color:var(--accent)}.muted{color:var(--muted);font-size:12px}p{margin:0}
-      .search-row{display:flex;gap:10px}.search{display:flex;gap:12px;align-items:center;flex:1;border:1px solid var(--line);border-radius:10px;padding:8px 14px;background:rgba(128,145,170,.06)}.search span{font-size:24px;color:var(--muted)}input{width:100%;border:0;background:transparent;color:inherit;padding:4px;min-width:0}input::placeholder{color:var(--muted)}
-      nav{display:flex;gap:7px;flex-wrap:wrap;padding:16px 0 20px;border-bottom:1px solid var(--line)}nav button{border-color:transparent;background:transparent}nav button[aria-pressed=true]{color:var(--accent);background:rgba(84,161,229,.13);border-color:rgba(84,161,229,.3)}
-      .results-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:20px 0 16px}.controls{display:flex;gap:12px;font-size:12px}.controls label{display:flex;align-items:center;gap:7px;color:var(--muted)}select{background:#242a34;color:#eef2f7;border:1px solid var(--line);border-radius:7px;padding:7px;max-width:180px}.back{font-size:12px;border:0;background:none;padding:0;margin-bottom:8px;color:var(--accent)}
-      .items{display:grid;gap:12px}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}.folder{display:flex;flex-direction:column;align-items:flex-start;padding:18px;text-align:left;gap:5px;min-width:0}.folder strong{font-size:16px;overflow-wrap:anywhere}.folder-icon{color:var(--accent);font-size:34px;line-height:1.1;margin-bottom:10px}
-      .card{min-width:0;border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:10px;background:rgba(128,145,170,.045)}.card:hover{border-color:rgba(120,180,230,.55)}.card-top{display:flex;align-items:center;gap:8px;min-width:0}.tag{color:var(--muted);font-size:11px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.unread{font-size:10px;color:var(--accent)}.unread:before{content:'● ';font-size:8px}.star{margin-left:auto;padding:0;width:30px;height:30px;flex-shrink:0;font-size:23px;line-height:1;border-color:transparent;background:transparent;color:var(--muted)}.star[aria-pressed=true]{color:#efc668}
-      .cover{display:block;border-radius:7px;overflow:hidden}.preview{position:relative;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;width:100%;aspect-ratio:16/10;overflow:hidden;background:linear-gradient(135deg,rgba(95,155,215,.2),rgba(155,115,190,.1));color:var(--muted)}.preview-initial{font-size:32px;color:var(--accent);opacity:.7}.preview-caption{font-size:10px}.preview img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .15s}.preview.has-image img{opacity:1}.preview.has-image .preview-initial,.preview.has-image .preview-caption{visibility:hidden}
-      .folder-contents{display:flex;flex-direction:column;gap:9px;border-top:1px solid var(--line);padding-top:12px;margin-top:8px;width:100%}.folder-entry{display:flex;align-items:center;gap:10px;min-width:0}.preview-small{width:48px;height:48px;aspect-ratio:1;border-radius:6px;flex-shrink:0}.preview-small .preview-initial{font-size:20px}.preview-small .preview-caption{display:none}.folder-entry-title{font-size:12px;line-height:1.4;font-weight:400;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
-      .thread-title{font-size:15px;font-weight:650;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-height:44px}.card-bottom{display:flex;gap:12px;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:auto}.author{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-bottom a{flex-shrink:0}
-      .compact{grid-template-columns:1fr}.compact .card{display:grid;grid-template-columns:64px 140px minmax(0,1fr) 190px;align-items:center;gap:16px;padding:10px 14px}.compact .cover .preview{aspect-ratio:1}.compact .cover .preview-caption{display:none}.compact .thread-title{min-height:0}.compact .card-bottom{margin:0;flex-direction:column;gap:2px;text-align:right}
-      footer{display:flex;justify-content:center;align-items:center;gap:20px;margin-top:24px;font-size:12px}.empty{padding:40px 12px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:10px}.notice{padding:12px;margin-top:12px;border:1px solid #aa8344;border-radius:8px;color:#dcb772}.notice button{margin-left:8px;font-size:12px}
-      @media(max-width:700px){.library{padding:16px}header{align-items:flex-start}h2{font-size:22px}header button{max-width:110px}.results-head{align-items:flex-start;flex-direction:column}.controls{flex-wrap:wrap}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}.compact .card{grid-template-columns:64px minmax(0,1fr);gap:8px 12px}.compact .cover{grid-row:1/4}.compact .card-bottom{flex-direction:row;text-align:left;grid-column:2}.compact .thread-title{grid-column:2}nav{gap:3px}nav button{padding:7px 9px}.search-row{flex-wrap:wrap}}
-      :host([data-theme=light]){--muted:#687486;--accent:#2474b5}:host([data-theme=light]) select{background:#fff;color:#243345}
+      .library{padding:8px 4px}header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:28px}header button{font-size:12px;border:0;color:var(--muted)}
+      h2{font-size:26px;font-weight:600;letter-spacing:-.7px;margin:0 0 5px}h3{font-size:15px;font-weight:600;margin:0 0 2px}.muted{color:var(--muted);font-size:12px}p{margin:0}
+      .search-row{display:flex;gap:10px}.search{display:flex;gap:10px;align-items:center;flex:1;border-bottom:1px solid var(--line);padding:8px 0}.search span{font-size:24px;color:var(--muted)}input{width:100%;border:0;background:transparent;color:inherit;padding:4px;min-width:0}input::placeholder{color:var(--muted)}
+      nav{display:flex;gap:24px;flex-wrap:wrap;margin-top:18px;border-bottom:1px solid var(--line)}nav button{padding:10px 0;border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--muted)}nav button[aria-pressed=true]{color:inherit;border-bottom-color:currentColor}
+      .results-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:24px 0 20px}.controls{display:flex;gap:12px;font-size:12px}.controls label{display:flex;align-items:center;gap:7px;color:var(--muted)}select{background:#242424;color:#eee;border:1px solid var(--line);border-radius:4px;padding:6px;max-width:180px}.back{font-size:12px;border:0;padding:0;margin-bottom:8px;color:var(--muted)}
+      .items{display:grid;gap:28px 24px}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.folder{display:flex;flex-direction:column;align-items:flex-start;padding:16px 0;text-align:left;gap:4px;min-width:0;border:0;border-top:1px solid var(--line);border-radius:0}.folder strong{font-size:15px;font-weight:600;overflow-wrap:anywhere}
+      .card{min-width:0;display:flex;flex-direction:column;gap:8px}.card-top{display:flex;align-items:center;gap:8px;min-width:0}.tag{color:var(--muted);font-size:11px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.unread{font-size:10px;color:var(--accent)}.unread:before{content:'● ';font-size:7px}.star{margin-left:auto;padding:0;width:30px;height:30px;flex-shrink:0;font-size:22px;line-height:1;border:0;color:var(--muted)}.star[aria-pressed=true]{color:inherit}
+      .cover{display:block;border-radius:4px;overflow:hidden}.preview{position:relative;display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:16/10;overflow:hidden;background:var(--surface);color:var(--muted)}.preview-initial{font-size:24px;font-weight:400;letter-spacing:2px;opacity:.5}.preview img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.preview.has-image .preview-initial{visibility:hidden}
+      .folder-contents{display:flex;flex-direction:column;gap:12px;margin-top:16px;width:100%}.folder-entry{display:flex;align-items:center;gap:12px;min-width:0}.preview-small{width:40px;height:40px;aspect-ratio:1;border-radius:3px;flex-shrink:0}.preview-small .preview-initial{font-size:13px}.folder-entry-title{font-size:12px;line-height:1.4;font-weight:400;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+      .thread-title{font-size:14px;font-weight:550;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-height:42px}.card-bottom{display:flex;gap:12px;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:auto}.author{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-bottom a{flex-shrink:0}
+      .compact{grid-template-columns:1fr;gap:0}.compact .card{display:grid;grid-template-columns:56px 140px minmax(0,1fr) 150px;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--line)}.compact .cover .preview{aspect-ratio:1}.compact .thread-title{min-height:0}.compact .card-bottom{margin:0;flex-direction:column;gap:2px;text-align:right}
+      footer{display:flex;justify-content:center;align-items:center;gap:20px;margin-top:32px;font-size:12px}.empty{padding:48px 12px;text-align:center;color:var(--muted)}.notice{padding:12px;margin-top:12px;border-left:2px solid #aa8344;color:#dcb772}.notice button{margin-left:8px;font-size:12px}
+      @media(max-width:700px){header{align-items:flex-start}h2{font-size:22px}header button{max-width:100px}.results-head{align-items:flex-start;flex-direction:column}.controls{flex-wrap:wrap}.folders,.cards{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:24px 16px}.compact .card{grid-template-columns:48px minmax(0,1fr);gap:4px 12px}.compact .cover{grid-row:1/4}.compact .card-bottom{flex-direction:row;text-align:left;grid-column:2}.compact .thread-title{grid-column:2}nav{gap:16px}nav button{font-size:12px}.search-row{flex-wrap:wrap}}
+      :host([data-theme=light]){--muted:#636970;--accent:#30343b}:host([data-theme=light]) select{background:#fff;color:#242424}
     `;
   }
 })().catch(error => {

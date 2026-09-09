@@ -33,18 +33,18 @@ async function setup(html, options = {}) {
   });
   dom.window.chrome = { storage: store.api };
   const observed = new Set();
-  let onIntersection;
+  let intersect;
   dom.window.IntersectionObserver = class {
-    constructor(callback) { onIntersection = callback; }
-    observe(element) { observed.add(element); }
-    unobserve(element) { observed.delete(element); }
+    constructor(callback) { intersect = callback; }
+    observe(box) { observed.add(box); }
+    unobserve(box) { observed.delete(box); }
     disconnect() { observed.clear(); }
   };
   dom.window.fetch = options.fetch || (async () => { throw new Error('unexpected fetch'); });
   await dom.window.eval(script);
   const shadow = dom.window.document.querySelector('#citylink-watched').shadowRoot;
   return { dom, shadow, store, $: selector => shadow.querySelector(selector),
-    reveal: () => onIntersection([...observed].map(target => ({ target, isIntersecting: true }))) };
+    reveal: () => intersect([...observed].map(target => ({ target, isIntersecting: true }))) };
 }
 
 test('defaults to folder cards, with bounded thread pages and native view available', async () => {
@@ -141,107 +141,206 @@ test('failed pages expose incomplete-search notice and can be retried', async ()
   } finally { app.dom.window.close(); }
 });
 
-test('folder previews show three recent threads; visible covers fetch once and reuse the image in cards', async () => {
-  const urls = [];
-  const app = await setup(Array.from({ length: 5 }, (_, i) => row(i + 1)).join(''), { fetch: async url => {
-    urls.push(String(url));
-    return { ok: true, text: async () => `<img src="/logo.png"><div class="message-body"><div class="bbWrapper">
-      <div class="bbCodeBlock--quote"><img src="https://images.example/quote.jpg"></div>
-      <img class="smilie" src="/smilies/smile.png"><img width="16" src="/tiny.png">
-      <img data-src="https://images.example/cover.jpg" src="data:image/gif;base64,AA==">
-      </div></div>` };
-  } });
+
+function withPreview(id, media) {
+  return row(id).replace('<div class="structItem-title">', media + '<div class="structItem-title">');
+}
+
+test('native dcThumbnail background images work inside avatar wrappers', async () => {
+  const requests = [];
+  const app = await setup(withPreview(1, `<a class="avatar dcThumbnail" href="/threads/topic.1/">
+    <img style="background-image: url(https://cdn.example/dc_thumbnails/1.jpg?123); object-position: -99999px 99999px" src="data:image/png;base64,AA==">
+    </a>`), { fetch: async url => { requests.push(String(url)); throw new Error('unexpected fetch'); } });
   try {
-    assert.equal(urls.length, 0, 'offscreen previews do not fetch thread pages');
+    assert.equal(app.$('.preview img').src, 'https://cdn.example/dc_thumbnails/1.jpg?123');
+    app.$('.folder').click();
+    assert.equal(app.$('.preview img').src, 'https://cdn.example/dc_thumbnails/1.jpg?123');
+    assert.deepEqual(requests, []);
+  } finally { app.dom.window.close(); }
+});
+
+test('folder and card previews reuse watched images without fetching posts', async () => {
+  const requests = [];
+  const app = await setup(Array.from({ length: 5 }, (_, i) =>
+    withPreview(i + 1, '<img data-src="https://images.example/cover.jpg" src="/placeholder.svg">')).join(''),
+    { fetch: async url => { requests.push(String(url)); throw new Error('unexpected fetch'); } });
+  try {
     assert.deepEqual([...app.shadow.querySelectorAll('.folder-entry-title')].map(el => el.textContent), ['Thread 5', 'Thread 4', 'Thread 3']);
-    app.reveal(); await new Promise(resolve => setTimeout(resolve, 50));
-    assert.equal(urls.length, 3);
-    assert.ok(urls.every(url => /^https:\/\/simpcity.cr\/threads\/topic\.\d+\/(?:latest)?$/.test(url)), 'use same-origin thread pages');
     assert.equal(app.$('.preview img').src, 'https://images.example/cover.jpg');
-    assert.equal(app.$('.preview img').referrerPolicy, 'no-referrer');
     app.$('.folder').click();
     assert.equal(app.$('.card .preview img').src, 'https://images.example/cover.jpg');
-    assert.equal(urls.length, 3, 'cached previews survive rerendering');
-    const img = app.$('.preview img'); img.dispatchEvent(new app.dom.window.Event('error'));
-    assert.ok(app.$('.card .preview').querySelector('img'));
-    assert.match(app.$('.preview-caption').textContent, /^(Preview|Generated cover)$/);
+    assert.equal(app.$('.preview img').loading, 'lazy');
+    assert.equal(app.$('.preview img').referrerPolicy, 'no-referrer');
+    app.$('.preview img').dispatchEvent(new app.dom.window.Event('error'));
+    assert.equal(app.$('.preview').querySelector('img'), null);
+    assert.ok(app.$('.preview-initial'));
+    app.$('[data-section="folders"]').click();
+    await tick();
+    assert.deepEqual(requests, []);
   } finally { app.dom.window.close(); }
 });
 
-test('preview loading limits concurrency and drops offscreen jobs after navigation', async () => {
-  const pending = [];
-  const app = await setup(Array.from({ length: 6 }, (_, i) => row(i + 1)).join(''), {
-    fetch: url => new Promise(resolve => pending.push({ url, resolve })),
-  });
-  try {
-    app.$('[data-section="all"]').click(); app.reveal();
-    assert.equal(pending.length, 2);
-    app.$('[data-section="favourites"]').click();
-    for (const request of pending) request.resolve({ ok: true, text: async () => '<div class="message-body">No images</div>' });
-    await tick(); await tick();
-    assert.equal(pending.length, 4, 'latest and canonical pages are bounded to the visible jobs');
-    app.$('[data-section="all"]').click();
-    assert.match(app.$('.preview-caption').textContent, /^(Preview|Generated cover)$/);
-  } finally { app.dom.window.close(); }
-});
-
-test('preview cache persists across page loads, expires, and rejects unsafe image URLs', async () => {
+test('missing or unsafe previews use valid old cache without fetching offscreen posts', async () => {
   const store = storage();
-  store.values['citylink:watched:default:previews'] = {
-    1: { url: 'https://images.example/cached.jpg', at: Date.now() },
-    2: { url: 'https://images.example/expired.jpg', at: Date.now() - 8 * 86400000 },
-    3: { url: 'javascript:alert(1)', at: Date.now() },
-  };
+  store.values['citylink:watched:default:previews'] = { 1: { url: 'https://images.example/old.jpg', at: Date.now() } };
   const requests = [];
-  const app = await setup(row(1) + row(2) + row(3), { store, fetch: async url => {
-    requests.push(url);
-    return { ok: true, text: async () => '<div class="message-body"><div class="bbWrapper"><img src="javascript:alert(1)"><img src="http://insecure.example/img.jpg"></div></div>' };
+  const app = await setup(withPreview(1, '<a class="avatar"><img src="/users/1.jpg"></a><img src="javascript:alert(1)"><img src="http://insecure.example/image.jpg">') + row(2),
+    { store, fetch: async url => { requests.push(String(url)); throw new Error('unexpected fetch'); } });
+  try {
+    app.$('[data-section="all"]').click();
+    assert.equal(app.shadow.querySelectorAll('.preview img').length, 1);
+    assert.equal(app.$('[data-preview-id="1"] img').src, 'https://images.example/old.jpg');
+    assert.equal(app.shadow.querySelectorAll('.preview-initial').length, 2);
+    await tick();
+    assert.deepEqual(requests, []);
+  } finally { app.dom.window.close(); }
+});
+
+test('previews from additional watched pages work without extra requests', async () => {
+  const requests = [];
+  const app = await setup(row(1), { pages: 2, fetch: async url => {
+    requests.push(String(url));
+    return { ok: true, text: async () => '<div class="structItemContainer">' +
+      withPreview(2, '<img data-original="/attachments/cover.jpg">') + '</div>' };
   } });
   try {
-    assert.equal(app.$('[data-preview-id="1"] img').src, 'https://images.example/cached.jpg');
-    app.reveal(); await tick(); await tick();
-    assert.equal(requests.length, 2, 'latest and canonical pages may both be tried');
-    assert.ok(app.$('[data-preview-id="2"] img'));
-    assert.ok(app.$('[data-preview-id="3"] img'));
-    assert.equal(app.$('[data-preview-id="2"] .preview-caption').textContent, 'Generated cover');
-    await new Promise(resolve => setTimeout(resolve, 350));
-    assert.equal(store.values['citylink:watched:default:previews'][2].url, '');
+    app.$('[data-section="all"]').click();
+    assert.equal(app.$('[data-preview-id="2"] img').src, 'https://simpcity.cr/attachments/cover.jpg');
+    assert.deepEqual(requests, ['https://simpcity.cr/watched/threads?page=2']);
   } finally { app.dom.window.close(); }
 });
 
-test('preview extraction covers OpenGraph, attachment links, and lazy image fields', async () => {
-  const app = await setup(row(1), { fetch: async () => ({ ok: true, text: async () => `
-    <meta property="og:image" content="https://images.example/og.jpg">
-    <div class="message-body"><div class="bbWrapper">
-      <a href="https://images.example/attachment.png">download image</a>
-      <img data-original="https://images.example/lazy.jpg" src="/placeholder.svg">
-    </div></div>` }) });
-  try {
-    app.reveal(); await tick(); await tick();
-    assert.equal(app.$('.preview img').src, 'https://images.example/og.jpg');
-  } finally { app.dom.window.close(); }
-});
-
-test('preview extraction accepts extensionless Goonbox image links', async () => {
-  const app = await setup(row(1), { fetch: async () => ({ ok: true, text: async () => `
-    <div class="message-body"><a class="link link--external" href="https://goonbox.cr/img/ak9Rgzm"></a></div>` }) });
-  try {
-    app.reveal(); await tick(); await tick();
-    assert.equal(app.$('.preview img').src, 'https://goonbox.cr/img/ak9Rgzm');
-  } finally { app.dom.window.close(); }
-});
-
-test('an old empty cache entry is observed and retried', async () => {
+test('missing covers fetch once on visibility and persist across reloads', async () => {
   const store = storage();
-  store.values['citylink:watched:default:previews'] = { 1: { url: '', at: Date.now() } };
+  const requests = [];
+  const fetch = async url => {
+    requests.push(String(url));
+    return { ok: true, text: async () => '<div class="message-body"><img data-src="https://cdn.example/cover.jpg"></div>' };
+  };
+  const app = await setup(row(1), { store, fetch });
+  try {
+    assert.equal(requests.length, 0);
+    app.reveal(); app.reveal(); await tick(); await tick();
+    assert.deepEqual(requests, ['https://simpcity.cr/threads/topic.1/']);
+    assert.equal(app.$('.preview img').src, 'https://cdn.example/cover.jpg');
+    app.$('.folder').click(); app.reveal();
+    assert.equal(requests.length, 1);
+    const fresh = await setup(row(1), { store, fetch });
+    try {
+      fresh.reveal(); await tick();
+      assert.equal(fresh.$('.preview img').src, 'https://cdn.example/cover.jpg');
+      assert.equal(requests.length, 1);
+    } finally { fresh.dom.window.close(); }
+  } finally { app.dom.window.close(); }
+});
+
+test('broken native preview falls back to post cover; broken cover has a failure cooldown', async () => {
   let requests = 0;
-  const app = await setup(row(1), { store, fetch: async () => {
+  const app = await setup(withPreview(1, '<img src="https://cdn.example/native.jpg">'), { fetch: async () => {
     requests++;
-    return { ok: true, text: async () => '<div class="message-body"><a href="https://goonbox.cr/img/x"><img data-url="https://cdn.example/actual.md.jpg"></a></div>' };
+    return { ok: true, text: async () => '<meta property="og:image" content="https://cdn.example/fallback.jpg">' };
+  } });
+  try {
+    app.reveal(); assert.equal(requests, 0);
+    app.$('.preview img').dispatchEvent(new app.dom.window.Event('error'));
+    app.reveal(); await tick(); await tick();
+    assert.equal(app.$('.preview img').src, 'https://cdn.example/fallback.jpg');
+    app.$('.preview img').dispatchEvent(new app.dom.window.Event('error'));
+    app.$('.folder').click(); app.reveal(); await tick();
+    assert.equal(requests, 1);
+    assert.equal(app.$('.preview img'), null);
+  } finally { app.dom.window.close(); }
+});
+
+test('successful cover URLs never expire, including legacy cache entries', async () => {
+  for (const legacy of [false, true]) {
+    const store = storage();
+    const entry = { url: 'https://cdn.example/cover.jpg', at: Date.now() - 365 * 86400000 };
+    if (legacy) store.values['citylink:watched:default:previews'] = { 1: entry };
+    else store.values['citylink:watched:default:cover:1'] = entry;
+    let requests = 0;
+    const app = await setup(row(1), { store, fetch: async () => { requests++; throw new Error('unexpected fetch'); } });
+    try {
+      app.reveal(); app.$('.folder').click(); app.reveal(); await tick();
+      assert.equal(app.$('.preview img').src, entry.url);
+      assert.equal(requests, 0);
+      app.$('.preview img').dispatchEvent(new app.dom.window.Event('error'));
+      assert.equal(store.values['citylink:watched:default:cover:1'].url, '');
+    } finally { app.dom.window.close(); }
+  }
+});
+
+test('negative cache prevents repeat fetches and expired cache can recover', async () => {
+  const store = storage();
+  let requests = 0;
+  const fetch = async () => { requests++; return { ok: true, text: async () => '<div class="message-body">No images</div>' }; };
+  const app = await setup(row(1), { store, fetch });
+  app.reveal(); await tick(); await tick(); app.dom.window.close();
+  const cached = await setup(row(1), { store, fetch });
+  cached.reveal(); await tick(); cached.dom.window.close();
+  assert.equal(requests, 1);
+  store.values['citylink:watched:default:cover:1'].at -= 3600001;
+  const expired = await setup(row(1), { store, fetch });
+  expired.reveal(); await tick(); await tick(); expired.dom.window.close();
+  assert.equal(requests, 2);
+});
+
+test('429 pauses queued covers and persists cooldown across page reloads', async () => {
+  for (const retry of ['120', new Date(Date.now() + 180000).toUTCString(), null]) {
+    const store = storage();
+    const requests = [];
+    const fetch = async url => { requests.push(String(url)); return { ok: false, status: 429, headers: { get: () => retry } }; };
+    const app = await setup(row(1) + row(2), { store, fetch });
+    try {
+      app.reveal(); await tick(); await tick();
+      assert.equal(requests.length, 1);
+      assert.ok(store.values['citylink:watched:cooldown:https://simpcity.cr'] > Date.now() + 100000);
+      app.$('.folder').click(); app.reveal(); await tick();
+      assert.equal(requests.length, 1);
+      const fresh = await setup(row(1), { store, fetch, pages: 2 });
+      try { fresh.reveal(); await tick(); assert.equal(requests.length, 1); }
+      finally { fresh.dom.window.close(); }
+    } finally { app.dom.window.close(); }
+  }
+});
+
+test('cover queue runs one at a time and drops disconnected jobs', async () => {
+  const pending = [];
+  const app = await setup(row(1) + row(2) + row(3), { fetch: url => new Promise(resolve => pending.push({ url, resolve })) });
+  try {
+    app.reveal(); assert.equal(pending.length, 1);
+    app.$('[data-section="favourites"]').click();
+    pending[0].resolve({ ok: true, text: async () => '<div class="message-body">No image</div>' });
+    await tick(); await tick();
+    assert.equal(pending.length, 1);
+  } finally { app.dom.window.close(); }
+});
+
+test('queued covers wait at least 1.5 seconds between requests', async () => {
+  const times = [];
+  const app = await setup(row(1) + row(2), { fetch: async () => {
+    times.push(Date.now());
+    return { ok: true, text: async () => '<div class="message-body">No image</div>' };
   } });
   try {
     app.reveal(); await tick(); await tick();
-    assert.equal(requests, 1);
-    assert.equal(app.$('[data-preview-id="1"] img').src, 'https://cdn.example/actual.md.jpg');
+    assert.equal(times.length, 1);
+    await new Promise(resolve => setTimeout(resolve, 1600));
+    assert.equal(times.length, 2);
+    assert.ok(times[1] - times[0] >= 1500);
   } finally { app.dom.window.close(); }
+});
+
+test('list previews support lazy attributes, srcset, and explicit preview metadata', async () => {
+  for (const media of [
+    '<img data-lazy-src="/cover.jpg">',
+    '<img data-url="/cover.jpg">',
+    '<picture><source srcset="/cover.jpg 1x, /large.jpg 2x"><img src="/fallback.jpg"></picture>',
+    '<span data-preview-url="/cover.jpg"></span>',
+    '<video poster="/cover.jpg"></video>',
+  ]) {
+    const app = await setup(withPreview(1, '<img src="/avatars/1.jpg">' + media));
+    try { assert.equal(app.$('.preview img').src, 'https://simpcity.cr/cover.jpg'); }
+    finally { app.dom.window.close(); }
+  }
 });

@@ -22,15 +22,22 @@ The watched page opens on category folders. Open a folder to see compact cards,
 or use All threads, Favourites and Unread. Search spans all loaded pages and folders;
 each view shows at most 24 items per page. A compact list layout is also available.
 Folders preview their three most recently updated threads with thumbnails and titles.
-Thread cards have image covers, and compact rows keep a small thumbnail. Previews load
-the first thread page only when near the viewport, with at most two preview requests
-at once. The first eligible image in post content is used; avatars, quoted images and
-spoiler images are excluded. Covers are cached locally for seven days (missing or failed
-previews for one hour), with a generated SVG title cover as fallback so every card
-always has a visual cover. Fetching thread pages may
-affect the forum's read tracking; the unread count reflects the loaded watched list.
+Thread cards and compact rows prefer the watched list's native thumbnail, including
+CSS background images and lazy image attributes. Only missing or broken previews
+fall back to a cached cover or fetch the canonical thread's first page near the viewport.
+Successful cover URLs persist without an expiry and are invalidated if the image fails
+to load; empty results and failures are cached for one hour before another attempt.
+Fallback requests run one at a time per tab, at least 1.5 seconds apart, after list loading.
+A 429 pauses new list and cover requests until Retry-After (at least one minute), or
+five minutes without a valid header. The cooldown is saved and shared across watched
+tabs; revisit the view or retry after it expires. Already running requests can finish.
+The cache stores image URLs, not image bytes: image hosts and other forum activity
+can still return 429. Fetching a thread may affect forum read tracking.
+Missing images show quiet title initials; user avatars are excluded.
+The layout uses simple tabs, fine dividers and unframed cards. The unread count
+reflects the loaded watched list.
 Stars persist in extension-local storage and follow the thread ID even after a rename.
-View/search/page state is remembered in the current tab. Original forum view restores
+View/search/page state is remembered in the current tab. Forum view restores
 the native current-page list and bulk-management controls. Failed page loads show an
 incomplete-results notice and a retry button; loading uses at most three requests at once.
 
